@@ -1,0 +1,153 @@
+import bpy
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+from mathutils import Vector
+top = bpy.data.objects['Humming-top']
+Camera = bpy.data.objects['Camera']
+def update_camera(scene):
+    Camera.data.lens = 18 
+    Camera.location = top.location + Vector((0, 0, 25))
+    Camera.rotation_euler = (np.radians(90), 0, 0)
+    Camera_constraint_track = Camera.constraints.get("Track To")
+    if Camera_constraint_track is None:
+        Camera_constraint_track = Camera.constraints.new(type="TRACK_TO")
+        Camera_constraint_track.track_axis = "TRACK_NEGATIVE_Z"
+        Camera_constraint_track.up_axis = "UP_Y"
+    Camera_constraint_track.target = top
+bpy.app.handlers.frame_change_pre.clear()
+bpy.app.handlers.frame_change_pre.append(update_camera)
+top.rotation_euler[2] = 0
+top.keyframe_insert(data_path="rotation_euler", index=2, frame=1)
+top.rotation_euler[2] = 6.28
+top.keyframe_insert(data_path="rotation_euler", index=2, frame=30)
+spin_curve = top.animation_data.action.fcurves.find("rotation_euler", index=2)
+spin_curve.modifiers.new(type='CYCLES')
+path_points = [
+    bpy.data.objects['BézierCircle'],
+    bpy.data.objects['BézierCircle.001'],
+    bpy.data.objects['BézierCircle.002'],
+    bpy.data.objects['BézierCircle.003'],
+    bpy.data.objects['BézierCircle.004'],
+    bpy.data.objects['BézierCircle.005'],
+    bpy.data.objects['BézierCircle.006'],
+    bpy.data.objects['BézierCircle.007'],
+    bpy.data.objects['BézierCircle.008'],
+    bpy.data.objects['BézierCircle.009'],
+    bpy.data.objects['BézierCircle.010'],
+    bpy.data.objects['BézierCircle.011'],
+    bpy.data.objects['BézierCircle.012'],
+    bpy.data.objects['BézierCircle.013'],
+    bpy.data.objects['BézierCircle.014'],
+    bpy.data.objects['BézierCircle.015'],
+]
+class NeuralNetwork(nn.Module):
+    def __init__(self, state_size=3, action_size=3):
+        super().__init__()
+        self.fc1 = nn.Linear(state_size, 64)
+        self.fc2 = nn.Linear(64, 64)
+        self.fc3 = nn.Linear(64, action_size)
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
+class ReinforcementAI:
+    def __init__(self):
+        self.state_size = 3
+        self.action_size = 3
+        self.model = NeuralNetwork(state_size=self.state_size, action_size=self.action_size)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
+        self.memory = []
+        self.epsilon = 1.0
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.gamma = 0.95
+        self.batch_size = 32
+        self.load_checkpoint()
+        self.reset()
+    def reset(self):
+        spawn_target = random.choice(path_points)
+        offset_x = random.uniform(3, 6) * random.choice([-1, 1])
+        offset_y = random.uniform(3, 6) * random.choice([-1, 1])
+        top.location = spawn_target.location + Vector((offset_x, offset_y, 0))
+        bpy.context.view_layer.update()
+        return self.get_state()
+    def get_state(self):
+        nearest = min(path_points, key=lambda p: (p.location - top.location).length)
+        state_vector = nearest.location - top.location
+        return np.array([state_vector.x, state_vector.y, state_vector.z], dtype=np.float32)
+    def step(self, action):
+        move_dist = 0.5
+        if action == 0:
+            top.location = top.location + Vector((move_dist, 0, 0))
+        elif action == 1:
+            top.location = top.location + Vector((0, move_dist, 0))
+        else:
+            top.location = top.location + Vector((0, 0, move_dist))
+        bpy.context.view_layer.update()
+        nearest = min(path_points, key=lambda p: (p.location - top.location).length)
+        distance = (nearest.location - top.location).length
+        reward = -distance
+        done = distance < 0.3
+        return self.get_state(), reward, done
+    def act(self, state):
+        if random.random() < self.epsilon:
+            return random.randint(0, self.action_size - 1)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        q_values = self.model(state_tensor)
+        return torch.argmax(q_values).item()
+    def replay(self):
+        if len(self.memory) < self.batch_size:
+            return
+        minibatch = random.sample(self.memory, self.batch_size)
+        criterion = nn.MSELoss()
+        for state, action, reward, next_state, done in minibatch:
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            next_state_tensor = torch.FloatTensor(next_state).unsqueeze(0)
+            current_q = self.model(state_tensor)
+            if done:
+                target_q = reward
+            else:
+                target_q = reward + self.gamma * torch.max(self.model(next_state_tensor)).item()
+            target = current_q.clone().detach()
+            target[0][action] = target_q
+            loss = criterion(current_q, target)
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
+    def update_epsilon(self):
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+    def save_checkpoint(self, filename="model_checkpoint.pth"):
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'epsilon': self.epsilon
+        }, filename)
+    def load_checkpoint(self, filename="model_checkpoint.pth"):
+        try:
+            checkpoint = torch.load(filename)
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            self.epsilon = checkpoint['epsilon']
+            print("Yep.")
+        except:
+            print("Nö.")
+agent = ReinforcementAI()
+num_episodes = 100
+for episode in range(num_episodes):
+    state = agent.reset()
+    total_reward = 0
+    for step in range(50):
+        action = agent.act(state)
+        next_state, reward, done = agent.step(action)
+        agent.memory.append((state, action, reward, next_state, done))
+        total_reward += reward
+        state = next_state
+        if done:
+            break
+    agent.replay()
+    agent.update_epsilon()
+    agent.save_checkpoint()
